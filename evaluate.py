@@ -1,5 +1,4 @@
 import sys
-sys.path.append('core')
 
 from PIL import Image
 import argparse
@@ -10,12 +9,13 @@ import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
-import datasets
-from model.flow.utils import flow_viz
-from model.flow.utils import frame_utils
+from datasets import datasets
+#from model.flow.utils import flow_viz
+from datasets import frame_utils
 
 from model.raft import RAFT
 from model.flow.utils import InputPadder, forward_interpolate
+from types import SimpleNamespace
 
 
 @torch.no_grad()
@@ -167,16 +167,23 @@ def validate_kitti(model, iters=24):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--model', help="restore checkpoint")
-    parser.add_argument('--dataset', help="dataset for evaluation")
-    parser.add_argument('--small', action='store_true', help='use small model')
-    parser.add_argument('--mixed_precision', action='store_true', help='use mixed precision')
-    parser.add_argument('--alternate_corr', action='store_true', help='use efficent correlation implementation')
-    args = parser.parse_args()
+    base = os.path.dirname(__file__)
+    ckpt_path = os.path.join(base, "train_checkpoints", "raft.pth")
+
+    args = SimpleNamespace(
+        model = ckpt_path,
+        dataset = "kitti",
+        feat_type = "dinov3",
+        split = 'testing',
+        dinov3_model = 'vitb16',
+        batch_size=6,
+        image_size=[320, 1152],
+        mixed_precision = True,
+        alternate_corr = False,
+        )
 
     model = torch.nn.DataParallel(RAFT(args))
-    model.load_state_dict(torch.load(args.model))
+    model.load_state_dict(torch.load(args.model),"cuda")
 
     model.cuda()
     model.eval()

@@ -1,6 +1,7 @@
 import os
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 dinov3_dir = os.path.join(".", "dinov3")
 dinov3_weights_dir = os.path.join(".", "checkpoints")
@@ -36,15 +37,20 @@ class dinov3(nn.Module):
         self.model.eval()
 
     def forward(self,x):
+        B, _, H, W = x.shape
+
         out = self.model.forward_features(x)  
 
         # shape: [B, N, C]
         tokens = out["x_norm_patchtokens"]    
-        B, N, C = tokens.shape
+        _, N, C = tokens.shape
 
-        H_feat = int(N ** 0.5)
-        W_feat = H_feat
-        tokens = tokens.permute(0, 2, 1)          # [B, C, N]
+        patch_size = 16  # ViT-16
+
+        H_feat = H // patch_size
+        W_feat = W // patch_size
+
+        tokens = tokens.permute(0, 2, 1).contiguous()          # [B, C, N]
         feat = tokens.reshape(B, C, H_feat, W_feat)  # [B, C, H_feat, W_feat]
 
         return feat
@@ -74,6 +80,8 @@ class Dinov3Encoder(nn.Module):
             x = torch.cat(x, dim=0)
 
         x = self.backbone(x)
+        x = F.interpolate(x, scale_factor=2.0,
+                          mode='bilinear', align_corners=False)#上采样到 1/8 尺度: [B, C_in, H/8, W/8]
         x = self.conv2(x)
 
         if self.training and self.dropout is not None:

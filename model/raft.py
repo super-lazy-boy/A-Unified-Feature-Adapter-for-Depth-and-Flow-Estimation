@@ -3,23 +3,23 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from flow.update import BasicUpdateBlock, SmallUpdateBlock
+from model.flow.update import BasicUpdateBlock, SmallUpdateBlock
 from model.feat.extractor import BasicEncoder, SmallEncoder
 from model.feat.corr import CorrBlock, AlternateCorrBlock
-from model.feat.dinov3 import dinov3
-from flow.utils import bilinear_sampler, coords_grid, upflow8
+from model.feat.dinov3 import Dinov3Encoder
+from model.flow.utils import bilinear_sampler, coords_grid, upflow8
 
-try:
-    autocast = torch.cuda.amp.autocast
-except:
-    # dummy autocast for PyTorch < 1.6
-    class autocast:
-        def __init__(self, enabled):
-            pass
-        def __enter__(self):
-            pass
-        def __exit__(self, *args):
-            pass
+# try:
+#     autocast = torch.cuda.amp.autocast
+# except:
+#     # dummy autocast for PyTorch < 1.6
+#     class autocast:
+#         def __init__(self, enabled):
+#             pass
+#         def __enter__(self):
+#             pass
+#         def __exit__(self, *args):
+#             pass
 
 # 基于RSFT，针对作业要求修改
 class RAFT(nn.Module):
@@ -45,11 +45,12 @@ class RAFT(nn.Module):
             args.corr_levels = 4
             args.corr_radius = 4
 
-        if 'dropout' not in self.args:
-            self.args.dropout = 0
+        if not hasattr(self.args, 'dropout'):
+            self.args.dropout = 0.0
 
-        if 'alternate_corr' not in self.args:
+        if not hasattr(self.args, 'alternate_corr'):
             self.args.alternate_corr = False
+
 
         # feature network, context network, and update block
         if args.feat_type == 'small' :
@@ -63,8 +64,8 @@ class RAFT(nn.Module):
             self.update_block = BasicUpdateBlock(self.args, hidden_dim=hdim)
 
         elif args.feat_type == 'dinov3':
-            self.fnet = dinov3(model="vitb16")        
-            self.cnet = BasicEncoder(output_dim=hdim+cdim, norm_fn='batch', dropout=args.dropout)
+            self.fnet = Dinov3Encoder(output_dim=256, model='vitb16', dropout=args.dropout)    
+            self.cnet = Dinov3Encoder(output_dim=hdim+cdim, model='vitb16', dropout=args.dropout)
             self.update_block = BasicUpdateBlock(self.args, hidden_dim=hdim)
 
     def freeze_bn(self):
@@ -107,8 +108,10 @@ class RAFT(nn.Module):
         hdim = self.hidden_dim
         cdim = self.context_dim
 
+        #autocast = torch.amp.autocast('cuda', enabled=self.args.mixed_precision)
+
         # run the feature network
-        with autocast(enabled=self.args.mixed_precision):
+        with torch.amp.autocast('cuda', enabled=self.args.mixed_precision):
             fmap1, fmap2 = self.fnet([image1, image2])        
         
         fmap1 = fmap1.float()
@@ -119,7 +122,7 @@ class RAFT(nn.Module):
             corr_fn = CorrBlock(fmap1, fmap2, radius=self.args.corr_radius)
 
         # run the context network
-        with autocast(enabled=self.args.mixed_precision):
+        with torch.amp.autocast('cuda', enabled=self.args.mixed_precision):
             cnet = self.cnet(image1)
             net, inp = torch.split(cnet, [hdim, cdim], dim=1)
             net = torch.tanh(net)
@@ -136,7 +139,7 @@ class RAFT(nn.Module):
             corr = corr_fn(coords1) # index correlation volume
 
             flow = coords1 - coords0
-            with autocast(enabled=self.args.mixed_precision):
+            with torch.amp.autocast('cuda', enabled=self.args.mixed_precision):
                 net, up_mask, delta_flow = self.update_block(net, inp, corr, flow)
 
             # F(t+1) = F(t) + \Delta(t)

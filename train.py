@@ -17,13 +17,13 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from model.raft import RAFT
 import evaluate
-import datasets
+from datasets import datasets
 
 from torch.utils.tensorboard import SummaryWriter
 from types import SimpleNamespace
 
 try:
-    from torch.cuda.amp import GradScaler
+    from torch.amp import GradScaler
 except:
     # dummy GradScaler for PyTorch < 1.6
     class GradScaler:
@@ -145,14 +145,14 @@ def train(args):
     model.cuda()
     model.train()
 
-    if args.stage != 'chairs':
+    if args.datasets != 'chairs':
         model.module.freeze_bn()
 
     train_loader = datasets.fetch_dataloader(args)
     optimizer, scheduler = fetch_optimizer(args, model)
 
     total_steps = 0
-    scaler = GradScaler(enabled=args.mixed_precision)
+    scaler = GradScaler('cuda', enabled=args.mixed_precision)
     logger = Logger(model, scheduler)
 
     VAL_FREQ = 5000
@@ -209,7 +209,7 @@ def train(args):
                 break
 
     logger.close()
-    PATH = 'checkpoints/%s.pth' % args.name
+    PATH = 'train_checkpoints/%s.pth' % args.name
     torch.save(model.state_dict(), PATH)
 
     return PATH
@@ -225,9 +225,9 @@ if __name__ == '__main__':
         validation='kitti', # 想在哪些验证集上评估
 
         lr=2e-5,
-        num_steps=100000,
+        num_steps=500,
         batch_size=6,
-        image_size=[384, 512],
+        image_size=[320, 1152],
         gpus=[0],                       # 如果你只有一块卡就写 [0]
         mixed_precision=True,          # 显卡够的话也可以 True
 
@@ -241,10 +241,11 @@ if __name__ == '__main__':
         alternate_corr=False            # 没有 alt_cuda_corr 扩展就 False
     )
 
+
     torch.manual_seed(42)#the anwser of life, the universe and everything
     np.random.seed(42)
 
-    if not os.path.isdir('checkpoints'):
-        os.mkdir('checkpoints')
+    if not os.path.isdir('train_checkpoints'):
+        os.mkdir('train_checkpoints')
 
     train(args)

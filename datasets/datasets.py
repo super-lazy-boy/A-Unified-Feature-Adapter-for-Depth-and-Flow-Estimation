@@ -11,8 +11,8 @@ import random
 from glob import glob
 import os.path as osp
 
-import frame_utils
-from augmentor import FlowAugmentor, SparseFlowAugmentor
+from datasets import frame_utils
+from datasets.augmentor import FlowAugmentor, SparseFlowAugmentor
 
 
 class FlowDataset(data.Dataset):
@@ -159,7 +159,7 @@ class FlyingThings3D(FlowDataset):
       
 
 class KITTI(FlowDataset):
-    def __init__(self, aug_params=None, split='training', root='datasets/KITTI'):
+    def __init__(self, aug_params=None, split='training', root='data/KITTI'):
         super(KITTI, self).__init__(aug_params, sparse=True)
         if split == 'testing':
             self.is_test = True
@@ -199,6 +199,8 @@ class HD1K(FlowDataset):
 def fetch_dataloader(args, TRAIN_DS='C+T+K+S+H'):
     """ Create the data loader for the corresponding trainign set """
 
+    print("[DEBUG] args.image_size =", args.image_size)
+
     if args.datasets == 'chairs':
         aug_params = {'crop_size': args.image_size, 'min_scale': -0.1, 'max_scale': 1.0, 'do_flip': True}
         train_dataset = FlyingChairs(aug_params, split='training')
@@ -228,7 +230,7 @@ def fetch_dataloader(args, TRAIN_DS='C+T+K+S+H'):
         train_dataset = KITTI(aug_params, split='training')
 
     train_loader = data.DataLoader(train_dataset, batch_size=args.batch_size, 
-        pin_memory=False, shuffle=True, num_workers=4, drop_last=True)
+        pin_memory=False, shuffle=True, num_workers=0, drop_last=True)
 
     print('Training with %d image pairs' % len(train_dataset))
     return train_loader
