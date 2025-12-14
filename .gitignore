@@ -10,3 +10,6 @@ alt_cuda_corr/
 *.pth
 *.ckpt
 pretrain/
+Depth_Flow_Deeplearning/__pycache__/
+*.pyc
+*.yaml
