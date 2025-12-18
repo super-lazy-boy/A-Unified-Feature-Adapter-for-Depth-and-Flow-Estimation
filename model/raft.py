@@ -7,8 +7,11 @@ from model.flow.update import BasicUpdateBlock, SmallUpdateBlock
 from model.feat.extractor import BasicEncoder, SmallEncoder
 from model.feat.corr import CorrBlock, AlternateCorrBlock
 from model.feat.dinov3 import Dinov3Encoder
-from model.flow.utils import bilinear_sampler, coords_grid, upflow8
+from model.flow.utils import bilinear_sampler, coords_grid, upflow8, InputPadder
 from model.adapter import Adapter
+
+from depth_anything_v2.dpt import DepthAnythingV2
+ckpt_path = "Depth_Flow_Deeplearning/checkpoints/depth_anything_v2_vitb.pth"
 
 # try:
 #     autocast = torch.cuda.amp.autocast
@@ -23,9 +26,9 @@ from model.adapter import Adapter
 #             pass
 
 # 基于RSFT，针对作业要求修改
-class RAFT(nn.Module):
+class ZAQ(nn.Module):
     def __init__(self, args):
-        super(RAFT, self).__init__()
+        super(ZAQ, self).__init__()
         self.args = args
 
         if args.feat_type == 'small':
@@ -69,9 +72,80 @@ class RAFT(nn.Module):
             self.cnet = Dinov3Encoder(output_dim=hdim+cdim, model='vitb16', dropout=args.dropout)
             self.update_block = BasicUpdateBlock(self.args, hidden_dim=hdim)
 
+        # Depth Anything V2 模型部分
+        self.da_model_configs = {
+            'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
+            'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
+        }
+        self.merge_head = nn.Sequential(
+            nn.Conv2d(self.da_model_configs[args.da_size]['features'], self.da_model_configs[args.da_size]['features']//2*3, 3, stride=2, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(self.da_model_configs[args.da_size]['features']//2*3, self.da_model_configs[args.da_size]['features']*2, 3, stride=2, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(self.da_model_configs[args.da_size]['features']*2, self.da_model_configs[args.da_size]['features']*2, 3, stride=2, padding=1),
+        )
+
         self.flow_adapter = Adapter(channels=256)
 
+        self.depth_model = DepthAnythingV2(encoder='vitb', features=128, out_channels=[96, 192, 384, 768])
+        self.depth_model.load_state_dict(torch.load(ckpt_path), strict=False)
+        self.depth_model.to(self.args.device)
+        self.depth_model.eval()  # Set to evaluation mode
+        for param in self.depth_model.parameters():
+            param.requires_grad = False  # Freeze parameters
 
+        self.depthhead = nn.Sequential(
+            nn.Conv2d(in_dim, hidden, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden, 1, 3, padding=1),
+        )
+
+        # self._hook = self.depth_model.depth_head.scratch.output_conv1.register_forward_hook(self._save_feat)
+
+    def create_bases(self, disp):
+        B, C, H, W = disp.shape
+        assert C == 1
+        cx = 0.5
+        cy = 0.5
+
+        ys = torch.linspace(0.5 / H, 1.0 - 0.5 / H, H)
+        xs = torch.linspace(0.5 / W, 1.0 - 0.5 / W, W)
+        u, v = torch.meshgrid(xs, ys, indexing='xy')
+        u = u - cx
+        v = v - cy
+        u = u.unsqueeze(0).unsqueeze(0)
+        v = v.unsqueeze(0).unsqueeze(0)
+        u = u.repeat(B, 1, 1, 1).cuda()
+        v = v.repeat(B, 1, 1, 1).cuda()
+
+        aspect_ratio = W / H
+
+        Tx = torch.cat([-torch.ones_like(disp), torch.zeros_like(disp)], dim=1)
+        Ty = torch.cat([torch.zeros_like(disp), -torch.ones_like(disp)], dim=1)
+        Tz = torch.cat([u, v], dim=1)
+
+        Tx = Tx / torch.linalg.vector_norm(Tx, dim=(1,2,3), keepdim=True)
+        Ty = Ty / torch.linalg.vector_norm(Ty, dim=(1,2,3), keepdim=True)
+        Tz = Tz / torch.linalg.vector_norm(Tz, dim=(1,2,3), keepdim=True)
+        
+        Tx = 2 * disp * Tx
+        Ty = 2 * disp * Ty
+        Tz = 2 * disp * Tz
+
+        R1x = torch.cat([torch.zeros_like(disp), torch.ones_like(disp)], dim=1)
+        R2x = torch.cat([u * v, v * v], dim=1)
+        R1y = torch.cat([-torch.ones_like(disp), torch.zeros_like(disp)], dim=1)
+        R2y = torch.cat([-u * u, -u * v], dim=1)
+        Rz =  torch.cat([-v / aspect_ratio, u * aspect_ratio], dim=1)
+
+        R1x = R1x / torch.linalg.vector_norm(R1x, dim=(1,2,3), keepdim=True)
+        R2x = R2x / torch.linalg.vector_norm(R2x, dim=(1,2,3), keepdim=True)
+        R1y = R1y / torch.linalg.vector_norm(R1y, dim=(1,2,3), keepdim=True)
+        R2y = R2y / torch.linalg.vector_norm(R2y, dim=(1,2,3), keepdim=True)
+        Rz =  Rz  / torch.linalg.vector_norm(Rz,  dim=(1,2,3), keepdim=True)
+        
+        M = torch.cat([Tx, Ty, Tz, R1x, R2x, R1y, R2y, Rz], dim=1) # Bx(8x2)xHxW
+        return M
 
     def freeze_bn(self):
         for m in self.modules():
@@ -102,7 +176,27 @@ class RAFT(nn.Module):
 
 
     def forward(self, image1, image2, iters=12, flow_init=None, upsample=True, test_mode=False):
-        """ Estimate optical flow between pair of frames """
+
+        N, _, H, W = image1.shape
+        image1_res = F.interpolate(image1, (518, 518), mode="bilinear", align_corners = False) / 255. 
+        image2_res = F.interpolate(image2, (518, 518), mode="bilinear", align_corners = False) / 255.
+
+        mean = torch.from_numpy(np.array([0.485, 0.456, 0.406])).unsqueeze(0).unsqueeze(2).unsqueeze(2).cuda()
+        std = torch.from_numpy(np.array([0.229, 0.224, 0.225])).unsqueeze(0).unsqueeze(2).unsqueeze(2).cuda()
+
+        image1_res = image1_res / mean - std 
+        image2_res = image2_res / mean - std
+
+        im1_path1, depth1 = self.depth_model.forward(image1_res.float())
+        im2_path1, depth2 = self.depth_model.forward(image2_res.float())
+
+        im1_path1 = F.interpolate(im1_path1, (H, W), mode="bilinear", align_corners = False)
+        im2_path1 = F.interpolate(im2_path1, (H, W), mode="bilinear", align_corners = False)
+        bases1 = self.create_bases(F.interpolate(depth1, (H, W), mode="bilinear", align_corners = False))  
+        bases2 = self.create_bases(F.interpolate(depth2, (H, W), mode="bilinear", align_corners = False))          
+        
+        mono1 = self.merge_head(im1_path1)
+        mono2 = self.merge_head(im2_path1)
 
         image1 = 2 * (image1 / 255.0) - 1.0
         image2 = 2 * (image2 / 255.0) - 1.0
@@ -113,7 +207,13 @@ class RAFT(nn.Module):
         hdim = self.hidden_dim
         cdim = self.context_dim
 
-        #autocast = torch.amp.autocast('cuda', enabled=self.args.mixed_precision)
+        padder = InputPadder(image1.shape)
+        image1, image2 = padder.pad(image1, image2)
+        bases1 = padder.pad(bases1)
+        bases2 = padder.pad(bases2)
+        
+        N, _, H, W = image1.shape
+        dilation = torch.ones(N, 1, H//8, W//8, device=image1.device)
 
         # run the feature network
         with torch.amp.autocast('cuda', enabled=self.args.mixed_precision):
@@ -122,19 +222,11 @@ class RAFT(nn.Module):
         fmap1 = self.flow_adapter(fmap1)
         fmap2 = self.flow_adapter(fmap2)
 
+        fmap1 = torch.cat((fmap1, mono1), 1)
+        fmap2 = torch.cat((fmap2, mono2), 1)
+
         fmap1 = fmap1.float()
         fmap2 = fmap2.float()
-
-        B, C_img, H_img, W_img = image1.shape
-        Hc = H_img // 8
-        Wc = W_img // 8
-        if fmap1.shape[2] != Hc or fmap1.shape[3] != Wc:
-            # 这里使用双线性插值，把 [B, C, 46, 156] 变成 [B, C, 47, 156]
-            fmap1 = F.interpolate(fmap1, size=(Hc, Wc), mode='bilinear', align_corners=False)
-            fmap2 = F.interpolate(fmap2, size=(Hc, Wc), mode='bilinear', align_corners=False)
-
-        assert fmap1.shape[2] == Hc and fmap1.shape[3] == Wc, \
-            f"Feature map size {fmap1.shape[2:]} does not match expected {(Hc, Wc)}"    
 
         if self.args.alternate_corr:
             corr_fn = AlternateCorrBlock(fmap1, fmap2, radius=self.args.corr_radius)
@@ -142,27 +234,34 @@ class RAFT(nn.Module):
             corr_fn = CorrBlock(fmap1, fmap2, radius=self.args.corr_radius)
 
         # run the context network
+        cnet_input = torch.cat((image1, image2), 1)
         with torch.amp.autocast('cuda', enabled=self.args.mixed_precision):
-            cnet = self.cnet(image1)
+            cnet = self.cnet(cnet_input)
         cnet = cnet.float()
-
-        # 如果 cnet 的空间分辨率和 (Hc, Wc) 不一致，一样插值过去
-        if cnet.shape[2] != Hc or cnet.shape[3] != Wc:
-            cnet = F.interpolate(cnet, size=(Hc, Wc), mode='bilinear', align_corners=False)
-
-        # 防御式检查：确保最终 cnet 的 H、W 和 fmap / coords 一致
-        assert cnet.shape[2] == Hc and cnet.shape[3] == Wc, \
-            f"cnet spatial size {cnet.shape[2:]} != expected {(Hc, Wc)}"
         net, inp = torch.split(cnet, [hdim, cdim], dim=1)
         net = torch.tanh(net)
         inp = torch.relu(inp)
 
+        bnet_inputs = bases1[0]
+        bnet = self.bnet(bnet_inputs)
+        bnet = self.init_conv(bnet)
+        netbases, inpbases = torch.split(bnet, [hdim, cdim], dim=1)
+
+        inp = torch.cat((inp, inpbases), 1)
+        net = torch.cat((net, netbases), 1)
+
+        #run depthhead
+        depth1_pred1 = self.depthhead(depth1)
+        depth2_pred1 = self.depthhead(depth2)
+
+        #init flow
         coords0, coords1 = self.initialize_flow(image1)
 
         if flow_init is not None:
             coords1 = coords1 + flow_init
 
         flow_predictions = []
+
         for itr in range(iters):
             coords1 = coords1.detach()
             # print("feat fmap shape:", fmap1.shape)  # 一般是 [B, C, Hc, Wc]

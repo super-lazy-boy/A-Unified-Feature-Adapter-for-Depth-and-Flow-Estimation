@@ -15,7 +15,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 
 from torch.utils.data import DataLoader
-from model.raft import RAFT
+from model.raft import ZAQ
 import evaluate
 from datasets import datasets
 
@@ -176,9 +176,9 @@ def train(args):
 
     # print("Parameter Count: %d" % count_parameters(model))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = nn.DataParallel(RAFT(args), device_ids=args.gpus)
+    model = nn.DataParallel(ZAQ(args), device_ids=args.gpus)
     model = model.to(device)
-    # model = RAFT(args).to(device)
+    # model = ZAQ(args).to(device)
     print("Parameter Count: %d" % count_parameters(model))
 
     if args.restore_ckpt is not None:

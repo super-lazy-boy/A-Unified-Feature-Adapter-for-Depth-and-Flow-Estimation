@@ -147,7 +147,7 @@ class DPTHead(nn.Module):
         out = F.interpolate(out, (int(patch_h * 14), int(patch_w * 14)), mode="bilinear", align_corners=True)
         out = self.scratch.output_conv2(out)
         
-        return path_1,out
+        return path_4, path_3, path_2, path_1, out
 
 
 class DepthAnythingV2(nn.Module):
@@ -178,10 +178,10 @@ class DepthAnythingV2(nn.Module):
         
         features = self.pretrained.get_intermediate_layers(x, self.intermediate_layer_idx[self.encoder], return_class_token=True)
         
-        depth = self.depth_head(features, patch_h, patch_w)
+        p4, p3, p2, p1, depth = self.depth_head(features, patch_h, patch_w),depth = self.depth_head(features, patch_h, patch_w)
         depth = F.relu(depth)
         
-        return depth.squeeze(1)
+        return p1, depth 
     
     @torch.no_grad()
     def infer_image(self, raw_image, input_size=518):
