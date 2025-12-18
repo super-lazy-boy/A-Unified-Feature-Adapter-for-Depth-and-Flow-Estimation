@@ -10,8 +10,8 @@ from model.feat.dinov3 import Dinov3Encoder
 from model.flow.utils import bilinear_sampler, coords_grid, upflow8, InputPadder
 from model.adapter import Adapter
 
-from depth_anything_v2.dpt import DepthAnythingV2
-ckpt_path = "Depth_Flow_Deeplearning/checkpoints/depth_anything_v2_vitb.pth"
+from model.depth_anything_v2.dpt import DepthAnythingV2
+ckpt_path = "checkpoints/depth_anything_v2_vitb.pth"
 
 # try:
 #     autocast = torch.cuda.amp.autocast
@@ -88,12 +88,15 @@ class ZAQ(nn.Module):
         self.flow_adapter = Adapter(channels=256)
 
         self.depth_model = DepthAnythingV2(encoder='vitb', features=128, out_channels=[96, 192, 384, 768])
-        self.depth_model.load_state_dict(torch.load(ckpt_path), strict=False)
-        self.depth_model.to(self.args.device)
+        # self.depth_model.load_state_dict(torch.load(ckpt_path), strict=False)
+        # self.depth_model.to(self.args.device)
+        # model = nn.DataParallel(model, device_ids=args.gpus)
         self.depth_model.eval()  # Set to evaluation mode
         for param in self.depth_model.parameters():
             param.requires_grad = False  # Freeze parameters
 
+        in_dim = 1
+        hidden = 32 
         self.depthhead = nn.Sequential(
             nn.Conv2d(in_dim, hidden, 3, padding=1),
             nn.ReLU(inplace=True),
@@ -213,17 +216,20 @@ class ZAQ(nn.Module):
         bases2 = padder.pad(bases2)
         
         N, _, H, W = image1.shape
+        H8, W8 = H // 8, W // 8
         dilation = torch.ones(N, 1, H//8, W//8, device=image1.device)
 
         # run the feature network
         with torch.amp.autocast('cuda', enabled=self.args.mixed_precision):
             fmap1, fmap2 = self.fnet([image1, image2])        
-        
-        fmap1 = self.flow_adapter(fmap1)
-        fmap2 = self.flow_adapter(fmap2)
+            fmap1 = self.flow_adapter(fmap1)
+            fmap2 = self.flow_adapter(fmap2)
 
-        fmap1 = torch.cat((fmap1, mono1), 1)
-        fmap2 = torch.cat((fmap2, mono2), 1)
+        mono1_8 = F.interpolate(mono1, (H8, W8), mode="bilinear", align_corners=False)
+        mono2_8 = F.interpolate(mono2, (H8, W8), mode="bilinear", align_corners=False)
+
+        fmap1 = torch.cat([fmap1, mono1_8], dim=1)
+        fmap2 = torch.cat([fmap2, mono2_8], dim=1)
 
         fmap1 = fmap1.float()
         fmap2 = fmap2.float()
@@ -239,20 +245,21 @@ class ZAQ(nn.Module):
             cnet = self.cnet(cnet_input)
         cnet = cnet.float()
         net, inp = torch.split(cnet, [hdim, cdim], dim=1)
-        net = torch.tanh(net)
-        inp = torch.relu(inp)
 
-        bnet_inputs = bases1[0]
-        bnet = self.bnet(bnet_inputs)
-        bnet = self.init_conv(bnet)
-        netbases, inpbases = torch.split(bnet, [hdim, cdim], dim=1)
 
-        inp = torch.cat((inp, inpbases), 1)
-        net = torch.cat((net, netbases), 1)
+        bases_feat = self.bnet(bases1)                # [B, hdim+cdim, H8, W8]
+        netbases, inpbases = torch.split(bases_feat, [hdim, cdim], dim=1)
+
+        net = net + torch.tanh(netbases)
+        inp = inp + torch.relu(inpbases)
 
         #run depthhead
-        depth1_pred1 = self.depthhead(depth1)
-        depth2_pred1 = self.depthhead(depth2)
+        depth1_hw = F.interpolate(depth1, (H, W), mode="bilinear", align_corners=False)
+        depth2_hw = F.interpolate(depth2, (H, W), mode="bilinear", align_corners=False)
+
+        depth1_pred1 = self.depthhead(depth1_hw)
+        depth2_pred1 = self.depthhead(depth2_hw)
+
 
         #init flow
         coords0, coords1 = self.initialize_flow(image1)
@@ -287,4 +294,4 @@ class ZAQ(nn.Module):
         if test_mode:
             return coords1 - coords0, flow_up
             
-        return flow_predictions
+        return flow_predictions, depth1_pred1, depth2_pred1

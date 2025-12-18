@@ -316,8 +316,10 @@ if __name__ == '__main__':
         restore_ckpt=None,              # 或 'checkpoints/raft-things.pth'
         feat_type='dinov3',           #['small','basic','dinov3'] # 选择特征提取骨干网络
         dinov3_model='vitb16',      #['vitb16','vitl16'] # dinov3 模型类型
+        device ="cuda" if torch.cuda.is_available() else "cpu",
         validation='kitti', # 想在哪些验证集上评估
         stage = "train",
+        da_size = "vitb",
 
         lr=2e-5,
         num_steps=1,

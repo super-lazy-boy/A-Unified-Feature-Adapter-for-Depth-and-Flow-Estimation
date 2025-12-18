@@ -13,7 +13,7 @@ from datasets import datasets
 #from model.flow.utils import flow_viz
 from datasets import frame_utils
 
-from model.raft import RAFT
+from model.raft import ZAQ
 from model.flow.utils import InputPadder, forward_interpolate
 from types import SimpleNamespace
 from train import plot_curves
