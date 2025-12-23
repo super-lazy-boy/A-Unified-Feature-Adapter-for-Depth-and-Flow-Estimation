@@ -39,7 +39,7 @@ class FlowSeek(
         }
 
         self.dav2 = DepthAnythingV2(**self.da_model_configs[args.da_size])
-        self.dav2.load_state_dict(torch.load(f'checkpoints/depth_anything_v2_%s.pth'%args.da_size, map_location='cpu'))
+        self.dav2.load_state_dict(torch.load(f'checkpoints/depth_anything_v2_%s.pth'%args.da_size, map_location='cpu',weights_only=True))
         self.dav2 = self.dav2.cuda().eval()
         for param in self.dav2.parameters():
                 param.requires_grad = False              

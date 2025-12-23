@@ -337,7 +337,7 @@ def train(args):
         val_epe_history.append(val_results.get('kitti-epe', 0.0))
         val_f1_history.append(val_results.get('kitti-f1', 0.0))
         if 'kitti-epe' in val_results:
-            print(f"          val kitti EPE = {val_results['kitti-epe']:.3f}")
+            print(f"    val kitti EPE = {val_results['kitti-epe']:.3f}")
 
         if epoch % 200 == 0 or epoch == epochs - 1:
             ckpt_path = f"training_checkpoints/epoch{epoch+1}_{args.name}.pth"
@@ -374,7 +374,7 @@ if __name__ == '__main__':
         name="flowseek",
         dataset="kitti",
         stage="train",
-        gpus=[0,1,2,3,4,5],
+        gpus=[0,1],
         validation=['kitti'],
         use_var=True,
         var_min=0,
