@@ -14,7 +14,7 @@ from model.corr import CorrBlock
 from model.utils.utils import coords_grid, InputPadder
 from model.extractor import ResNetFPN
 from model.layer import conv1x1, conv3x3
-
+from model.depth import DepthHead
 from huggingface_hub import PyTorchModelHubMixin
 
 class FlowSeek(
@@ -73,6 +73,7 @@ class FlowSeek(
             self.fnet = ResNetFPN(args, input_dim=3, output_dim=self.output_dim, norm_layer=nn.BatchNorm2d, init_weight=True)
             self.update_block = BasicUpdateBlock(args, hdim=args.dim*2, cdim=args.dim*2)
 
+        self.depth_head = DepthHead(in_ch=1, hidden=32)
 
     def create_bases(self, disp):
         B, C, H, W = disp.shape
@@ -164,6 +165,9 @@ class FlowSeek(
         im1_path1, depth1 = self.dav2.forward(image1_res.float())
         im2_path1, _ = self.dav2.forward(image2_res.float())
 
+        depth1_ref = self.depth_head(depth1) 
+        depth_pred = F.interpolate(depth1_ref, (H, W), mode="bilinear", align_corners=False)
+
         im1_path1 = F.interpolate(im1_path1, (H, W), mode="bilinear", align_corners = False)
         im2_path1 = F.interpolate(im2_path1, (H, W), mode="bilinear", align_corners = False)
         bases1 = self.create_bases(F.interpolate(depth1, (H, W), mode="bilinear", align_corners = False))            
@@ -212,6 +216,8 @@ class FlowSeek(
         flow_up, info_up = self.upsample_data(flow_8x, info_8x, weight_update)
         flow_predictions.append(flow_up)
         info_predictions.append(info_up)
+
+        depth_loss = None
             
         if self.args.iters > 0:
             # run the feature network
@@ -266,6 +272,6 @@ class FlowSeek(
                 nf_loss = torch.logsumexp(weight, dim=1, keepdim=True) - torch.logsumexp(term1.unsqueeze(1) - term2, dim=2)
                 nf_predictions.append(nf_loss)
 
-            return {'final': flow_predictions[-1], 'flow': flow_predictions, 'info': info_predictions, 'nf': nf_predictions}
+            return {'final': flow_predictions[-1], 'flow': flow_predictions, 'info': info_predictions, 'nf': nf_predictions, 'depth': depth_pred}
         else:
-            return {'final': flow_predictions[-1], 'flow': flow_predictions, 'info': info_predictions, 'nf': None}
+            return {'final': flow_predictions[-1], 'flow': flow_predictions, 'info': info_predictions, 'nf': None, 'depth': depth_pred}

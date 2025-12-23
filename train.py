@@ -207,6 +207,17 @@ def plot_curves(list, title, xlabel= "epoch", save_path="result"):
     plt.savefig(save_path, dpi=300)
     print(f"[INFO] Saved training curves to {save_path}")
 
+def depth_l1_loss(depth_pred, depth, depth_valid, eps=1e-6):
+    # depth_pred: [B,1,H,W]
+    if depth.dim() == 3:  # [B,H,W]
+        depth = depth.unsqueeze(1)  # [B,1,H,W]
+    if depth_valid.dim() == 3:  # [B,H,W]
+        depth_valid = depth_valid.unsqueeze(1)  # [B,1,H,W]
+    mask = depth_valid > 0.5
+    denom = mask.sum().clamp_min(1.0)
+    return (mask * (depth_pred - depth).abs()).sum() / denom
+
+
 
 def train(args):
 
@@ -254,6 +265,8 @@ def train(args):
     val_epe_history = []
     val_f1_history = []
     epochs = args.num_steps
+
+    best_val_epe = float('inf')
     
 
     for epoch in range(epochs):
@@ -267,7 +280,7 @@ def train(args):
 
             
             optimizer.zero_grad()
-            image1, image2, flow, valid = [x.to(device, non_blocking=True)for x in data_blob]
+            image1, image2, flow, depth, flow_valid, depth_valid = [x.to(device, non_blocking=True)for x in data_blob]
 
             if args.add_noise:
                 stdv = np.random.uniform(0.0, 5.0)
@@ -277,8 +290,12 @@ def train(args):
                 image2 = (image2 + noise2).clamp(0.0, 255.0)
 
             output = model(image1, image2, iters=args.iters, flow_gt=flow, test_mode=False)
-            loss, metrics = sequence_loss(output, flow, valid, gamma=args.gamma)
+            flow_loss, metrics = sequence_loss(output, flow, flow_valid, gamma=args.gamma)
+            depth_loss = depth_l1_loss(output['depth'], depth, depth_valid)
 
+            loss = flow_loss + depth_loss
+
+            optimizer.zero_grad()
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
@@ -327,8 +344,11 @@ def train(args):
             torch.save(model.state_dict(), ckpt_path)
             print(f"[Checkpoint] Saved: {ckpt_path}")
 
-        
-            
+        current_val_epe = val_results.get('kitti-epe', float('inf'))
+        if current_val_epe < best_val_epe:
+            best_val_epe = current_val_epe
+            torch.save(model.state_dict(), f"training_checkpoints/best_{args.name}.pth")
+
         model.train()
         
         # if args.dataset != 'chairs2':

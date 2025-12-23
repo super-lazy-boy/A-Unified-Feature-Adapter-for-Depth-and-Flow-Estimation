@@ -65,27 +65,32 @@ class FlowDataset(data.Dataset):
 
         index = index % len(self.image_list)
         valid = None
+        depth = None
+        depth_valid = None
         if self.sparse:
             if self.dataset == 'TartanAir':
                 flow = np.load(self.flow_list[index])
-                valid = np.load(self.mask_list[index])
+                flow_valid = np.load(self.mask_list[index])
                 # rescale the valid mask to [0, 1]
-                valid = 1 - valid / 100
+                flow_valid = 1 - flow_valid / 100
                 
             elif self.dataset == 'MegaDepth':
                 depth0 = np.array(h5py.File(self.extra_info[index][0], 'r')['depth'])
                 depth1 = np.array(h5py.File(self.extra_info[index][1], 'r')['depth'])
                 camera_data = self.megascene[index]
                 flow_01, flow_10 = induced_flow(depth0, depth1, camera_data)
-                valid = check_cycle_consistency(flow_01, flow_10)
+                flow_valid = check_cycle_consistency(flow_01, flow_10)
                 flow = flow_01
             else:
-                flow, valid = frame_utils.readFlowKITTI(self.flow_list[index])
+                flow, flow_valid = frame_utils.readFlowKITTI(self.flow_list[index])
         else:
             if self.dataset == 'Infinigen':
                 # Inifinigen flow is stored as a 3D numpy array, [Flow, Depth]
-                flow = np.load(self.flow_list[index])
-                flow = flow[..., :2]
+                data_np = np.load(self.flow_list[index])
+                flow = data_np[..., :2]
+                if data_np.shape[-1] >= 3:
+                    depth = data_np[..., 2].astype(np.float32)
+                    depth_valid = (depth > 0).astype(np.float32)
             elif self.dataset == 'vKITTI':
                 flow = frame_utils.readFlowvKITTI(self.flow_list[index])
             else:
@@ -119,15 +124,20 @@ class FlowDataset(data.Dataset):
         img1 = torch.from_numpy(img1).permute(2, 0, 1).float()
         img2 = torch.from_numpy(img2).permute(2, 0, 1).float()
         flow = torch.from_numpy(flow).permute(2, 0, 1).float()
+        H, W = img1.shape[1], img1.shape[2]
         flow[torch.isnan(flow)] = 0
         flow[flow.abs() > 1e9] = 0
 
-        if valid is not None:
-            valid = torch.from_numpy(valid)
+        if flow_valid is not None:
+            flow_valid = torch.from_numpy(flow_valid)
         else:
-            valid = (flow[0].abs() < 1000) & (flow[1].abs() < 1000)
+            flow_valid = (flow[0].abs() < 1000) & (flow[1].abs() < 1000)
+        if depth_valid is None:
+                depth_valid = torch.ones((H, W), dtype=torch.float32)
+        else:
+            depth_valid = torch.from_numpy(depth_valid).float()
 
-        return img1, img2, flow, valid.float()
+        return img1, img2, flow, flow_valid.float(), depth, depth_valid.float()
 
 
     def __rmul__(self, v):
