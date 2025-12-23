@@ -269,7 +269,7 @@ class LayeredFlow(data.Dataset):
         return img1, img2, coords, flows, materials, layers
 
 class KITTI(FlowDataset):
-    def __init__(self, aug_params=None, split='training', root='data/kitti/'):
+    def __init__(self, aug_params=None, split='training', root='./data/KITTI/'):
         super(KITTI, self).__init__(aug_params, sparse=True)
         if split == 'testing':
             self.is_test = True

@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader
 # from model.raft import ZAQ
 from model.flowseek import FlowSeek
 # import evaluate
-from model.datasets import fetch_dataloader
+from model.datasets import fetch_dataloader, KITTI
 
 from torch.utils.tensorboard import SummaryWriter
 from types import SimpleNamespace
@@ -101,7 +101,7 @@ def fetch_optimizer(args, model,train_loader):
 @torch.no_grad()
 def validate_kitti_flowseek(model, iters=24):
     model.eval()
-    val_dataset = datasets.KITTI(split='training')
+    val_dataset = KITTI(split='training')
 
     out_list, epe_list = [], []
     for val_id in range(len(val_dataset)):
@@ -326,11 +326,13 @@ def train(args):
             ckpt_path = f"training_checkpoints/epoch{epoch+1}_{args.name}.pth"
             torch.save(model.state_dict(), ckpt_path)
             print(f"[Checkpoint] Saved: {ckpt_path}")
+
+        
             
         model.train()
         
-        if args.datasets != 'chairs2':
-            model.module.freeze_bn()
+        # if args.dataset != 'chairs2':
+        #     model.module.freeze_bn()
 
 
     logger.close()
@@ -351,8 +353,9 @@ if __name__ == '__main__':
     args = SimpleNamespace(
         name="flowseek",
         dataset="kitti",
-        gpus=[0],
-
+        stage="train",
+        gpus=[0,1,2,3,4,5],
+        validation=['kitti'],
         use_var=True,
         var_min=0,
         var_max=10,
