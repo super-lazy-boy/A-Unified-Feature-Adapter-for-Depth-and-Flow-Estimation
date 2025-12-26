@@ -299,11 +299,14 @@ class FlyingThings3D(FlowDataset):
 class KITTI(FlowDataset):
     def __init__(self, aug_params=None, split='training', root='datasets/KITTI'):
         super(KITTI, self).__init__(aug_params, sparse=True)
-        if split == 'testing':
-            self.is_test = True
-
         self.root = osp.join(root, split)
         self.calib_dir = osp.join(self.root, "calib_cam_to_cam")
+
+        if split == "testing":
+            has_flow = len(glob(osp.join(self.root, "flow_occ/*_10.png"))) > 0
+            self.is_test = not has_flow
+        else:
+            self.is_test = False
 
         images1 = sorted(glob(osp.join(self.root, 'image_2/*_10.png')))
         images2 = sorted(glob(osp.join(self.root, 'image_2/*_11.png')))
