@@ -522,5 +522,6 @@ if __name__ == '__main__':
     train(args)
     args.name = "block4"
     args.feat_type="resnet"
+    args.num_blocks=4
     args.block_dims=[64,128,256,512]
     train(args)
