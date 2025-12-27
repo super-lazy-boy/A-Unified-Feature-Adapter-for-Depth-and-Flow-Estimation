@@ -216,12 +216,13 @@ def build_args():
         gpus=[0],
         mixed_precision=True,
         iters=4,              # must match training (or you can increase for better quality)
-        save_dir=os.path.join(base, "result_test", "deeplearning_depth"),
+        save_dir=os.path.join(base, "result_test", "test"),
 
         # FlowSeek / ResNetFPN required hyperparams (copy from train.py defaults)
         pretrain="resnet34",
         initial_dim=64,
         block_dims=[64, 128, 256],
+        feat_type="resnet",
 
         radius=4,
         dim=128,

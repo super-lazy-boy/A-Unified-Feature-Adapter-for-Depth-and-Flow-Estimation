@@ -429,21 +429,23 @@ def train(args):
         for k, v in val_results.items():
             history[k].append(v)
 
-        # checkpoint（更合理：每个 epoch 保存 last；best 按 val/flow_loss）
-        ckpt_last = f"training_checkpoints/{args.name}/last_{args.name}.pth"
+        # checkpoint（更合理：每个 epoch 保存 last；best 按 val_loss）
+        ckpt_last = f"train_checkpoints/{args.name}/last_{args.name}.pth"
+        os.makedirs(os.path.dirname(ckpt_last), exist_ok=True)
         torch.save(model.state_dict(), ckpt_last)
 
         best_val_loss = float("inf") 
         current_val_loss = val_results.get("val/flow_loss", float("inf"))*args.flow_weight+val_results.get("val/depth_loss", float("inf"))*args.depth_weight
         if current_val_loss < best_val_loss:
             best_val_loss = current_val_loss
-            ckpt_best = f"training_checkpoints/{args.name}/best_{args.name}.pth"
+            ckpt_best = f"train_checkpoints/{args.name}/best_{args.name}.pth"
+            os.makedirs(os.path.dirname(ckpt_best), exist_ok=True)
             torch.save(model.state_dict(), ckpt_best)
             print(f"[Checkpoint] Best updated: val_loss={best_val_loss:.3f} -> {ckpt_best}")
 
     # 保存最终模型
     os.makedirs('train_checkpoints', exist_ok=True)
-    final_path = f"train_checkpoints/{args.name}.pth"
+    final_path = f"train_checkpoints/{args.name}/{args.name}.pth"
     torch.save(model.state_dict(), final_path)
     print(f"[Final] Model saved to: {final_path}")
 
@@ -455,7 +457,7 @@ def train(args):
 
 if __name__ == '__main__':
     args = SimpleNamespace(
-        name="deeplearning_flow",
+        name="test",
         dataset="kitti",
         stage="train",
         gpus=[0,1],                 # 建议先单卡跑通；多卡再开
@@ -463,6 +465,7 @@ if __name__ == '__main__':
 
         use_var=True,
         var_min=0,
+        feat_type = "simple",
         var_max=10,
 
         pretrain="resnet34",
@@ -506,11 +509,14 @@ if __name__ == '__main__':
 
     args.mixed_precision = True
 
-    args.name = "deeplearning_flow"
+    args.name = "feat_resnet"
     args.flow_weight=1.0
-    args.depth_weight=0.0
-    train(args)
-    args.name = "deeplearning_depth"
-    args.flow_weight=0.0
     args.depth_weight=1.0
+    args.feat_type="resnet"
+    train(args)
+    args.name = "feat_simple"
+    args.feat_type="simple"
+    train(args)
+    args.name = "feat_dinov3"
+    args.feat_type="dinov3"
     train(args)

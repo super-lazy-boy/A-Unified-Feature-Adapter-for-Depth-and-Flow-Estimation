@@ -16,6 +16,8 @@ from model.extractor import ResNetFPN
 from model.layer import conv3x3
 from model.depth import DepthHead
 from huggingface_hub import PyTorchModelHubMixin
+from model.dinov3 import Dinov3Encoder
+from model.extractor import SimpleConvEncoder
 
 
 class FlowSeek(nn.Module, PyTorchModelHubMixin):
@@ -73,8 +75,22 @@ class FlowSeek(nn.Module, PyTorchModelHubMixin):
         )
 
         if args.iters > 0:
-            self.fnet = ResNetFPN(args, input_dim=3, output_dim=self.output_dim,
-                                  norm_layer=nn.BatchNorm2d, init_weight=True)
+            if args.feat_type == "resnet":
+                self.fnet = ResNetFPN(
+                    args, input_dim=3, output_dim=self.output_dim,
+                    norm_layer=nn.BatchNorm2d, init_weight=True
+                )
+
+            elif args.feat_type == "simple":
+                self.fnet = SimpleConvEncoder(output_dim=self.output_dim)
+
+            elif args.feat_type == "dinov3":
+                # dino_model 例如 "vitb16"（与你 dinov3.py 保持一致）
+                dino_model = getattr(args, "dino_model", "vitb16")
+                self.fnet = Dinov3Encoder(output_dim=self.output_dim, model=dino_model, dropout=args.dropout if hasattr(args, "dropout") else 0.0)
+
+            else:
+                raise ValueError(f"Unknown args.model_feat = {feat_type}")
             self.update_block = BasicUpdateBlock(args, hdim=args.dim * 2, cdim=args.dim * 2)
 
         self.depth_head = DepthHead(in_ch=1, hidden=32)
@@ -221,6 +237,18 @@ class FlowSeek(nn.Module, PyTorchModelHubMixin):
         if self.args.iters > 0:
             fmap1_8x = self.fnet(image1n)
             fmap2_8x = self.fnet(image2n)
+
+            target_hw = flow_8x.shape[-2:]
+
+            if fmap1_8x.shape[-2:] != target_hw:
+                fmap1_8x = F.interpolate(fmap1_8x, size=target_hw, mode="bilinear", align_corners=False)
+            if fmap2_8x.shape[-2:] != target_hw:
+                fmap2_8x = F.interpolate(fmap2_8x, size=target_hw, mode="bilinear", align_corners=False)
+
+            if mono1.shape[-2:] != target_hw:
+                mono1 = F.interpolate(mono1, size=target_hw, mode="bilinear", align_corners=False)
+            if mono2.shape[-2:] != target_hw:
+                mono2 = F.interpolate(mono2, size=target_hw, mode="bilinear", align_corners=False)
 
             fmap1_8x = torch.cat((fmap1_8x, mono1), 1)
             fmap2_8x = torch.cat((fmap2_8x, mono2), 1)

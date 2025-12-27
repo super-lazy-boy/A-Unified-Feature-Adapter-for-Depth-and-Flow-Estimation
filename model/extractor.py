@@ -129,3 +129,24 @@ class ResNetFPN(nn.Module):
         # Output
         output = self.final_conv(x)
         return output
+    
+class SimpleConvEncoder(nn.Module):
+    """
+    极简CNN特征提取器（baseline，用于对比）。
+    输入:  [B,3,H,W]
+    输出:  [B,output_dim,H/8,W/8]
+    """
+    def __init__(self, output_dim=256, base_dim=64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(3, base_dim, 3, stride=2, padding=1),  # 1/2
+            nn.ReLU(inplace=True),
+            nn.Conv2d(base_dim, base_dim, 3, stride=2, padding=1),  # 1/4
+            nn.ReLU(inplace=True),
+            nn.Conv2d(base_dim, base_dim, 3, stride=2, padding=1),  # 1/8
+            nn.ReLU(inplace=True),
+            nn.Conv2d(base_dim, output_dim, 1, stride=1, padding=0),
+        )
+
+    def forward(self, x):
+        return self.net(x)
