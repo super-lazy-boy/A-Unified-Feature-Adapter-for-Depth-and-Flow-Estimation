@@ -90,7 +90,7 @@ class FlowSeek(nn.Module, PyTorchModelHubMixin):
                 self.fnet = Dinov3Encoder(output_dim=self.output_dim, model=dino_model, dropout=args.dropout if hasattr(args, "dropout") else 0.0)
 
             else:
-                raise ValueError(f"Unknown args.model_feat = {feat_type}")
+                raise ValueError(f"Unknown args.model_feat = {args.feat_type}")
             self.update_block = BasicUpdateBlock(args, hdim=args.dim * 2, cdim=args.dim * 2)
 
         self.depth_head = DepthHead(in_ch=1, hidden=32)
