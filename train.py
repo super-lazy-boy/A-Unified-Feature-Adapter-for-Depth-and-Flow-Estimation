@@ -520,3 +520,7 @@ if __name__ == '__main__':
     args.name = "feat_dinov3"
     args.feat_type="dinov3"
     train(args)
+    args.name = "block4"
+    args.feat_type="resnet"
+    args.block_dims=[64,128,256,512]
+    train(args)
