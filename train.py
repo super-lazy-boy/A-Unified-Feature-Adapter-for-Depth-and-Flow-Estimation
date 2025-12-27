@@ -192,6 +192,15 @@ def validate_one_epoch(model, val_loader, device, iters, epoch_idx, epochs_total
                 desc=f"Val   {epoch_idx+1}/{epochs_total}", dynamic_ncols=True)
 
     for data_blob in pbar:
+        if len(data_blob) == 3:
+            # test 模式：只有 image1, image2, extra_info
+            image1, image2, extra_info = data_blob
+            image1 = image1.to(device, non_blocking=True)
+            image2 = image2.to(device, non_blocking=True)
+
+            # 仅 forward（如果你需要保存预测可在这里做）
+            _ = model(image1, image2, iters=iters, flow_gt=None, test_mode=True)
+            continue
         # IMPORTANT: dataset returns: img1,img2,flow,flow_valid,depth,depth_valid
         image1, image2, flow, flow_valid, depth, depth_valid = data_blob
 
@@ -342,7 +351,7 @@ def train(args):
             # 深度指标（训练也统计，便于曲线）
             dmet = depth_metrics(out.get("depth", None), depth, depth_valid)
 
-            loss = flow_loss + args.depth_weight * dloss
+            loss = args.flow_weight*flow_loss + args.depth_weight * dloss
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -420,16 +429,17 @@ def train(args):
         for k, v in val_results.items():
             history[k].append(v)
 
-        # checkpoint（更合理：每个 epoch 保存 last；best 按 val/epe）
+        # checkpoint（更合理：每个 epoch 保存 last；best 按 val/flow_loss）
         ckpt_last = f"training_checkpoints/last_{args.name}.pth"
         torch.save(model.state_dict(), ckpt_last)
 
-        current_val_epe = val_results.get("val/epe", float("inf"))
-        if current_val_epe < best_val_epe:
-            best_val_epe = current_val_epe
+        best_val_loss = float("inf") 
+        current_val_loss = val_results.get("val/flow_loss", float("inf"))*args.flow_weight+val_results.get("val/depth_loss", float("inf"))*args.depth_weight
+        if current_val_loss < best_val_loss:
+            best_val_loss = current_val_loss
             ckpt_best = f"training_checkpoints/best_{args.name}.pth"
             torch.save(model.state_dict(), ckpt_best)
-            print(f"[Checkpoint] Best updated: val/epe={best_val_epe:.3f} -> {ckpt_best}")
+            print(f"[Checkpoint] Best updated: val_loss={best_val_loss:.3f} -> {ckpt_best}")
 
     # 保存最终模型
     os.makedirs('train_checkpoints', exist_ok=True)
@@ -445,7 +455,7 @@ def train(args):
 
 if __name__ == '__main__':
     args = SimpleNamespace(
-        name="flowseek",
+        name="deeplearning_flow",
         dataset="kitti",
         stage="train",
         gpus=[0,1],                 # 建议先单卡跑通；多卡再开
@@ -468,17 +478,19 @@ if __name__ == '__main__':
 
         image_size=[384, 512],
         scale=0,
-        batch_size=2,
+        batch_size=4,
         epsilon=1e-8,
         lr=4e-4,
         wdecay=1e-5,
         dropout=0,
         clip=1.0,
         gamma=0.85,
-        num_steps=2,
+
+        num_steps=200,  # 训练 epoch 数
         seed=42,
         mixed_precision=False,
 
+        flow_weight=1.0,   # 光流 loss 权重；可从 0.1~1.0 调参
         depth_weight=1.0,  # 深度 loss 权重；可从 0.1~1.0 调参
 
         paths={
@@ -492,4 +504,13 @@ if __name__ == '__main__':
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
+    args.mixed_precision = True
+
+    args.name = "deeplearning_flow"
+    args.flow_weight=1.0
+    args.depth_weight=0.0
+    train(args)
+    args.name = "deeplearning_depth"
+    args.flow_weight=0.0
+    args.depth_weight=1.0
     train(args)

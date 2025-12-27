@@ -299,74 +299,108 @@ class FlyingThings3D(FlowDataset):
 class KITTI(FlowDataset):
     def __init__(self, aug_params=None, split='training', root='datasets/KITTI'):
         super(KITTI, self).__init__(aug_params, sparse=True)
+
         self.root = osp.join(root, split)
         self.calib_dir = osp.join(self.root, "calib_cam_to_cam")
 
-        if split == "testing":
-            has_flow = len(glob(osp.join(self.root, "flow_occ/*_10.png"))) > 0
-            self.is_test = not has_flow
-        else:
-            self.is_test = False
-
+        # 1) 收集 image_2 对
         images1 = sorted(glob(osp.join(self.root, 'image_2/*_10.png')))
         images2 = sorted(glob(osp.join(self.root, 'image_2/*_11.png')))
 
-        self.image_list = []
-        self.extra_info = []
-        self.flow_list = []
-        self.depth_list = []   # 我们会把 disp_noc_0 放进 depth_list（先读出来），再转深度
-        self.calib_list = []   # 每个样本对应的 calib txt
-
+        img_pairs = {}
         for img1, img2 in zip(images1, images2):
             frame_name = osp.basename(img1)          # 000000_10.png
             frame_id = frame_name.split('_')[0]      # 000000
+            img_pairs[frame_id] = (img1, img2, frame_name)
 
-            calib_path = osp.join(self.calib_dir, f"{frame_id}.txt")
-            self.calib_list.append(calib_path)
+        # 2) calib
+        calib_map = {}
+        calib_files = sorted(glob(osp.join(self.calib_dir, "*.txt")))
+        for c in calib_files:
+            fid = osp.splitext(osp.basename(c))[0]
+            calib_map[fid] = c
 
-            self.extra_info.append([frame_name])
+        # 3) flow / disp（可能没有）
+        flow_map = {}
+        flow_files = sorted(glob(osp.join(self.root, 'flow_occ/*_10.png')))
+        for f in flow_files:
+            fname = osp.basename(f)          # 000000_10.png
+            fid = fname.split('_')[0]
+            flow_map[fid] = f
+
+        disp_map = {}
+        disp_files = sorted(glob(osp.join(self.root, 'disp_noc_0/*_10.png')))
+        for d in disp_files:
+            dname = osp.basename(d)
+            fid = dname.split('_')[0]
+            disp_map[fid] = d
+
+        # 4) 决定是否为 test：必须同时具备 flow 和 disp 才能做“有监督验证”
+        #    否则就是 test，只返回图像（不算指标）
+        has_supervision = (len(flow_map) > 0) and (len(disp_map) > 0)
+
+        if not has_supervision:
+            # test 模式：只要图像+calib存在即可（calib用于你未来需要 depth 推理时做转换也可）
+            keys = sorted(set(img_pairs.keys()) & set(calib_map.keys()))
+            self.is_test = True
+        else:
+            # 有监督：取四者交集，保证严格对齐
+            keys = sorted(set(img_pairs.keys()) & set(calib_map.keys()) & set(flow_map.keys()) & set(disp_map.keys()))
+            self.is_test = False
+
+        # 5) 构造列表（严格同序）
+        self.image_list = []
+        self.extra_info = []
+        self.flow_list = []
+        self.depth_list = []   # 这里先放 disp_noc_0 路径，父类会读出来；子类再转 depth
+        self.calib_list = []
+
+        for fid in keys:
+            img1, img2, frame_name = img_pairs[fid]
             self.image_list.append([img1, img2])
+            self.extra_info.append([frame_name])
+            self.calib_list.append(calib_map[fid])
 
-        if split == 'training':
-            self.flow_list = sorted(glob(osp.join(self.root, 'flow_occ/*_10.png')))
-            disp_list = sorted(glob(osp.join(self.root, 'disp_noc_0/*_10.png')))
+            if not self.is_test:
+                self.flow_list.append(flow_map[fid])
+                self.depth_list.append(disp_map[fid])
 
-            # 关键：让父类 FlowDataset 读取 disp，返回到 depth 字段里（先当作 raw disp）
-            self.depth_list = disp_list
-
-            # 安全检查：确保数量一致，否则会索引错位
+        # 最后做一次强校验，避免潜在错位
+        if not self.is_test:
             assert len(self.image_list) == len(self.flow_list) == len(self.depth_list) == len(self.calib_list), \
-                f"List length mismatch: images={len(self.image_list)}, flow={len(self.flow_list)}, " \
+                f"List length mismatch after alignment: images={len(self.image_list)}, flow={len(self.flow_list)}, " \
                 f"disp={len(self.depth_list)}, calib={len(self.calib_list)}"
 
     def __getitem__(self, index):
-        """
-        返回：
-        img1, img2: [3,H,W]
-        flow: [2,H,W]
-        flow_valid: [H,W] 或 [1,H,W]（取决于 frame_utils.readFlowKITTI）
-        depth: [1,H,W] (米)
-        depth_valid: [1,H,W]
-        """
+        if self.is_test:
+            # 直接复用父类 test 分支行为：只返回 (img1, img2, extra_info)
+            img1, img2, extra = super(KITTI, self).__getitem__(index)
+            return img1, img2, extra
+
+        # 训练/验证：父类会读 flow + disp(raw) 并返回
         img1, img2, flow, flow_valid, disp_raw, disp_valid = super(KITTI, self).__getitem__(index)
 
-        # 父类把 disp_noc_0 读到 disp_raw（float32），形状 [1,H,W]
-        # disp_noc_0 的真实值是 disparity*256，需要 /256 还原到像素视差
-        if disp_raw is None:
-            depth = None
-            depth_valid = None
-            return img1, img2, flow, flow_valid, depth, depth_valid
-
-        # 读取本帧的 calib，得到 f 和 B
+        # disp_raw: [1,H,W]，其真实值通常需要 /256 还原到像素视差
         calib_path = self.calib_list[index]
-        fx, B = read_kitti_fB_from_cam_to_cam_txt(calib_path)
+        fx, B = read_kitti_fB_from_cam_to_cam_txt(calib_path)  # :contentReference[oaicite:5]{index=5}
 
-        disp = disp_raw / 256.0  # [1,H,W] 视差（像素）
-        valid = (disp > 0.0).float()
+        disp = disp_raw.clone().float()
+        disp_max = float(disp.max().item())
+        if disp_max > 512.0:
+            disp = disp / 256.0  # convert to pixel disparity
 
-        # 深度（米）
+        # mask：disp > 0
+        valid = disp > 0.0
+
+        # depth = fx * B / disp
         depth = (fx * B) / (disp + 1e-6)
-        depth_valid = valid
+
+        # KITTI 常用最大深度 80m（或 100m），避免数值爆炸影响训练
+        max_depth = 80.0
+        valid = valid & (depth > 0.1) & (depth < max_depth)
+
+        depth_valid = valid.float()
+        depth = depth.clamp(min=0.0, max=max_depth)
 
         return img1, img2, flow, flow_valid.float(), depth, depth_valid
 
