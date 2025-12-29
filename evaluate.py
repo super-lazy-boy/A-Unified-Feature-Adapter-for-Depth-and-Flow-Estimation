@@ -1,20 +1,25 @@
-# evaluate.py (REPLACEMENT VERSION)
+# evaluate.py (MODIFIED)
+# - Logs evaluation metrics to CSV in the same schema as train.py
+# - Prints per-sample metrics similar to train.py validate_one_epoch()
+# - CSV path is fixed as: csv_path = f"{args.save_dir}/eval_metrics.csv"
+
+from __future__ import annotations
+
 import os
-import math
-import numpy as np
+import csv
+from datetime import datetime
 from types import SimpleNamespace
+
+import numpy as np
 from PIL import Image
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# IMPORTANT:
-# This assumes you run evaluate.py at project root where:
-#   - datasets.py exists (module name: datasets)
-#   - model/flowseek.py exists and can be imported as model.flowseek
 import model.datasets as datasets_module
 from model.flowseek import FlowSeek
+from model.loss import sequence_loss  # used in train.py for flow metrics
 
 
 # -----------------------------
@@ -37,7 +42,6 @@ def load_checkpoint(model: nn.Module, ckpt_path: str, device: torch.device):
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
 
     ckpt = torch.load(ckpt_path, map_location=device)
-    # Some projects save {"state_dict": ...}
     if isinstance(ckpt, dict) and "state_dict" in ckpt:
         ckpt = ckpt["state_dict"]
 
@@ -52,63 +56,117 @@ def load_checkpoint(model: nn.Module, ckpt_path: str, device: torch.device):
 
 
 # -----------------------------
-# Utils: flow visualization (RAFT-style color wheel)
+# CSV logging helpers
+# -----------------------------
+def _csv_append_row(csv_path: str, fieldnames: list[str], row: dict):
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    write_header = (not os.path.exists(csv_path)) or (os.path.getsize(csv_path) == 0)
+    with open(csv_path, "a", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        if write_header:
+            w.writeheader()
+        w.writerow(row)
+
+
+# -----------------------------
+# Depth losses/metrics (copied from train.py logic)
+# -----------------------------
+def depth_l1_loss(depth_pred, depth_gt, depth_valid, eps: float = 1e-6):
+    """
+    depth_pred: [B,1,H,W]
+    depth_gt:   [B,1,H,W]
+    depth_valid:[B,1,H,W] or [B,H,W]
+    """
+    if depth_gt is None or depth_valid is None or depth_pred is None:
+        return torch.tensor(0.0, device=depth_pred.device if depth_pred is not None else "cpu")
+
+    if depth_valid.dim() == 3:
+        depth_valid = depth_valid.unsqueeze(1)
+
+    mask = depth_valid > 0.5
+    denom = mask.sum().clamp_min(1.0)
+    if denom.item() <= 1.0:
+        return depth_pred.new_tensor(0.0)
+
+    if depth_pred.shape[-2:] != depth_gt.shape[-2:]:
+        depth_pred = F.interpolate(depth_pred, size=depth_gt.shape[-2:], mode="bilinear", align_corners=False)
+
+    return (mask * (depth_pred - depth_gt).abs()).sum() / denom
+
+
+@torch.no_grad()
+def depth_metrics(depth_pred, depth_gt, depth_valid, eps: float = 1e-6):
+    """
+    Returns dict with keys: depth_mae, depth_rmse, depth_abs_rel
+    """
+    if depth_gt is None or depth_valid is None or depth_pred is None:
+        return {"depth_mae": 0.0, "depth_rmse": 0.0, "depth_abs_rel": 0.0}
+
+    if depth_valid.dim() == 3:
+        depth_valid = depth_valid.unsqueeze(1)
+
+    if depth_pred.shape[-2:] != depth_gt.shape[-2:]:
+        depth_pred = F.interpolate(depth_pred, size=depth_gt.shape[-2:], mode="bilinear", align_corners=False)
+
+    mask = depth_valid > 0.5
+    denom = mask.sum().clamp_min(1.0)
+    if denom.item() <= 1.0:
+        return {"depth_mae": 0.0, "depth_rmse": 0.0, "depth_abs_rel": 0.0}
+
+    diff = (depth_pred - depth_gt)
+    mae = (mask * diff.abs()).sum() / denom
+    rmse = torch.sqrt((mask * diff.pow(2)).sum() / denom)
+    abs_rel = (mask * (diff.abs() / (depth_gt.abs() + eps))).sum() / denom
+
+    return {
+        "depth_mae": float(mae.item()),
+        "depth_rmse": float(rmse.item()),
+        "depth_abs_rel": float(abs_rel.item()),
+    }
+
+
+# -----------------------------
+# Visualization helpers (kept from your evaluate.py)
 # -----------------------------
 def make_colorwheel():
-    """
-    Color wheel as used in many optical flow papers / RAFT codebase style.
-    Returns: [ncols, 3] in uint8.
-    """
     # RY, YG, GC, CB, BM, MR
-    RY = 15
-    YG = 6
-    GC = 4
-    CB = 11
-    BM = 13
-    MR = 6
+    RY, YG, GC, CB, BM, MR = 15, 6, 4, 11, 13, 6
     ncols = RY + YG + GC + CB + BM + MR
     colorwheel = np.zeros((ncols, 3), dtype=np.uint8)
 
     col = 0
-    # RY
     colorwheel[0:RY, 0] = 255
     colorwheel[0:RY, 1] = np.floor(255 * np.arange(RY) / RY).astype(np.uint8)
     col += RY
-    # YG
-    colorwheel[col:col+YG, 0] = 255 - np.floor(255 * np.arange(YG) / YG).astype(np.uint8)
-    colorwheel[col:col+YG, 1] = 255
+
+    colorwheel[col:col + YG, 0] = 255 - np.floor(255 * np.arange(YG) / YG).astype(np.uint8)
+    colorwheel[col:col + YG, 1] = 255
     col += YG
-    # GC
-    colorwheel[col:col+GC, 1] = 255
-    colorwheel[col:col+GC, 2] = np.floor(255 * np.arange(GC) / GC).astype(np.uint8)
+
+    colorwheel[col:col + GC, 1] = 255
+    colorwheel[col:col + GC, 2] = np.floor(255 * np.arange(GC) / GC).astype(np.uint8)
     col += GC
-    # CB
-    colorwheel[col:col+CB, 1] = 255 - np.floor(255 * np.arange(CB) / CB).astype(np.uint8)
-    colorwheel[col:col+CB, 2] = 255
+
+    colorwheel[col:col + CB, 1] = 255 - np.floor(255 * np.arange(CB) / CB).astype(np.uint8)
+    colorwheel[col:col + CB, 2] = 255
     col += CB
-    # BM
-    colorwheel[col:col+BM, 2] = 255
-    colorwheel[col:col+BM, 0] = np.floor(255 * np.arange(BM) / BM).astype(np.uint8)
+
+    colorwheel[col:col + BM, 2] = 255
+    colorwheel[col:col + BM, 0] = np.floor(255 * np.arange(BM) / BM).astype(np.uint8)
     col += BM
-    # MR
-    colorwheel[col:col+MR, 2] = 255 - np.floor(255 * np.arange(MR) / MR).astype(np.uint8)
-    colorwheel[col:col+MR, 0] = 255
+
+    colorwheel[col:col + MR, 2] = 255 - np.floor(255 * np.arange(MR) / MR).astype(np.uint8)
+    colorwheel[col:col + MR, 0] = 255
 
     return colorwheel
 
 
-def flow_to_image(flow_uv, clip_flow=None, convert_to_bgr=False):
-    """
-    Convert flow to RGB image using color wheel.
-    flow_uv: [H, W, 2] float32
-    """
+def flow_to_image(flow_uv, clip_flow=None):
     flow = flow_uv.copy()
     if clip_flow is not None:
         flow = np.clip(flow, -clip_flow, clip_flow)
 
-    u = flow[..., 0]
-    v = flow[..., 1]
-
+    u, v = flow[..., 0], flow[..., 1]
     rad = np.sqrt(u * u + v * v)
     rad_max = np.max(rad) + 1e-5
 
@@ -125,31 +183,18 @@ def flow_to_image(flow_uv, clip_flow=None, convert_to_bgr=False):
     f = fk - k0
 
     img = np.zeros((flow.shape[0], flow.shape[1], 3), dtype=np.uint8)
-    for i in range(3):
-        col0 = colorwheel[k0, i] / 255.0
-        col1 = colorwheel[k1, i] / 255.0
+    for ci in range(3):
+        col0 = colorwheel[k0, ci] / 255.0
+        col1 = colorwheel[k1, ci] / 255.0
         col = (1 - f) * col0 + f * col1
-
-        # decrease saturation with radius
         col = 1 - rad / (rad_max) * (1 - col)
-        img[..., i] = np.floor(255 * col).astype(np.uint8)
+        img[..., ci] = np.floor(255 * col).astype(np.uint8)
 
-    if convert_to_bgr:
-        img = img[..., ::-1]
     return img
 
 
-# -----------------------------
-# Utils: depth visualization (paper-style colormap)
-# -----------------------------
 def depth_to_colormap(depth, valid_mask=None, dmin=None, dmax=None):
-    """
-    depth: [H,W] float32
-    valid_mask: [H,W] bool
-    Returns uint8 RGB.
-    """
     import matplotlib.cm as cm
-
     dep = depth.copy()
     if valid_mask is None:
         valid_mask = np.isfinite(dep) & (dep > 0)
@@ -163,21 +208,15 @@ def depth_to_colormap(depth, valid_mask=None, dmin=None, dmax=None):
     dep = np.clip(dep, dmin, dmax)
     dep_norm = (dep - dmin) / (dmax - dmin + 1e-6)
 
-    # common paper-like colormap: magma / plasma / inferno
     cmap = cm.get_cmap("magma")
-    colored = cmap(dep_norm)[:, :, :3]  # [H,W,3] float
+    colored = cmap(dep_norm)[:, :, :3]
     colored[~valid_mask] = 0.0
-    colored = (colored * 255.0).astype(np.uint8)
-    return colored
+    return (colored * 255.0).astype(np.uint8)
 
 
 def tensor_image_to_uint8(img_t):
-    """
-    img_t: torch tensor [3,H,W], values in [0,255] float
-    """
     img = img_t.detach().cpu().numpy().transpose(1, 2, 0)
-    img = np.clip(img, 0, 255).astype(np.uint8)
-    return img
+    return np.clip(img, 0, 255).astype(np.uint8)
 
 
 def save_png(path, arr_uint8):
@@ -186,12 +225,10 @@ def save_png(path, arr_uint8):
 
 
 def concat_horiz(img_list):
-    """Concatenate list of HxWx3 uint8 images horizontally with same height."""
     H = img_list[0].shape[0]
     outs = []
     for im in img_list:
         if im.shape[0] != H:
-            # resize to match height
             w = int(im.shape[1] * (H / im.shape[0]))
             im = np.array(Image.fromarray(im).resize((w, H), resample=Image.BILINEAR))
         outs.append(im)
@@ -199,55 +236,49 @@ def concat_horiz(img_list):
 
 
 # -----------------------------
-# Build args (MUST include FlowSeek dependencies)
+# Build args (aligned with train.py)
 # -----------------------------
 def build_args():
     base = os.path.dirname(__file__)
-
     args = SimpleNamespace(
         # paths
-        kitti_root=os.path.join(base, "data", "KITTI_split"),     # contains training/ testing/
-        split="testing",                                          # use testing
-        ckpt_path=os.path.join(base, "train_checkpoints","block4", "best_block4.pth"),
+        kitti_root=os.path.join(base, "data", "KITTI_split"),
+        split="testing",  # set to "training" if you want GT metrics
+        ckpt_path=os.path.join(base, "train_checkpoints", "deeplearning_depth.pth"),
 
         # inference
         batch_size=1,
         num_workers=2,
         gpus=[0],
         mixed_precision=True,
-        iters=4,              # must match training (or you can increase for better quality)
-        save_dir=os.path.join(base, "result_test", "block4"),
+        iters=4,
+        save_dir=os.path.join(base, "result_test", "deeplearning_depth"),
 
-        # FlowSeek / ResNetFPN required hyperparams (copy from train.py defaults)
+        # FlowSeek config (must match training)
         pretrain="resnet34",
         initial_dim=64,
-        block_dims=[64,128,256,512],
+        block_dims=[64, 128, 256, 512],
         feat_type="resnet",
 
         radius=4,
         dim=128,
-        num_blocks=4,
+        num_blocks=2,
 
-        # flow uncertainty branch configs used in forward (safe defaults)
+        # flow uncertainty branch configs
         use_var=True,
         var_min=0,
         var_max=10,
 
-        # DepthAnythingV2 backbone size used in FlowSeek
-        da_size="vitb",        # must match available checkpoints: checkpoints/depth_anything_v2_vitb.pth
+        # DepthAnythingV2 backbone
+        da_size="vitb",
 
-        # (kept for compatibility)
         dataset="kitti",
         stage="test",
     )
     return args
 
 
-# -----------------------------
-# Data loader
-# -----------------------------
-def build_kitti_test_loader(args):
-    # datasets.py defines KITTI(root=... , split=...)
+def build_kitti_loader(args):
     ds = datasets_module.KITTI(split=args.split, root=args.kitti_root)
     loader = torch.utils.data.DataLoader(
         ds,
@@ -255,85 +286,178 @@ def build_kitti_test_loader(args):
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=True,
-        drop_last=False
+        drop_last=False,
     )
     print(f"[INFO] KITTI {args.split} samples: {len(ds)}")
     return loader
 
 
 # -----------------------------
-# Main inference
+# Main inference + metrics logging
 # -----------------------------
 @torch.no_grad()
-def run_kitti_testing_inference(args):
+def run_kitti_inference_and_log(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[Device] {device}")
 
-    loader = build_kitti_test_loader(args)
+    os.makedirs(args.save_dir, exist_ok=True)
 
-    # Build model
+    # REQUIRED by user:
+    csv_path = f"{args.save_dir}/eval_metrics.csv"
+
+    loader = build_kitti_loader(args)
+
     model = FlowSeek(args).to(device)
     model.eval()
-
-    # Load weights
     load_checkpoint(model, args.ckpt_path, device)
 
-    # output dirs
+    # output dirs for visuals
     out_rgb = os.path.join(args.save_dir, "rgb")
     out_flow = os.path.join(args.save_dir, "flow")
     out_depth = os.path.join(args.save_dir, "depth")
     out_triplet = os.path.join(args.save_dir, "triplet")
+    for d in [out_rgb, out_flow, out_depth, out_triplet]:
+        os.makedirs(d, exist_ok=True)
 
-    os.makedirs(out_rgb, exist_ok=True)
-    os.makedirs(out_flow, exist_ok=True)
-    os.makedirs(out_depth, exist_ok=True)
-    os.makedirs(out_triplet, exist_ok=True)
+    # CSV schema aligned to train.py metric names
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fieldnames = [
+        "run_id", "split", "iter", "frame_name",
+        "flow_loss", "epe", "f1",
+        "depth_loss", "depth_mae", "depth_rmse", "depth_abs_rel",
+        "note"
+    ]
+
+    # accumulators for summary (only when GT exists)
+    sums = {k: 0.0 for k in ["flow_loss", "epe", "f1", "depth_loss", "depth_mae", "depth_rmse", "depth_abs_rel"]}
+    n_metric = 0
 
     for i, batch in enumerate(loader):
-        # KITTI in test mode returns (img1, img2, extra_info)
-        # but if split contains gt it may return 6-tuple. Handle both robustly.
+        # Two possible batch formats (as in train.py validate_one_epoch):
+        #  - test: (img1, img2, extra_info)
+        #  - supervised: (img1,img2,flow,flow_valid,depth,depth_valid)
         if isinstance(batch, (list, tuple)) and len(batch) == 3:
             image1, image2, extra = batch
             frame_name = extra[0][0] if isinstance(extra, (list, tuple)) else f"{i:06d}_10.png"
+            flow = flow_valid = depth = depth_valid = None
         else:
-            # supervised variant: img1,img2,flow,flow_valid,depth,depth_valid
-            image1, image2 = batch[0], batch[1]
+            image1, image2, flow, flow_valid, depth, depth_valid = batch
             frame_name = f"{i:06d}_10.png"
 
         image1 = image1.to(device, non_blocking=True)
         image2 = image2.to(device, non_blocking=True)
-
-        # forward
-        out = model(image1, image2, iters=args.iters, test_mode=True)
-
-        # Flow: out['final'] is [B,2,H,W]
-        flow = out["final"][0].detach().cpu().numpy().transpose(1, 2, 0).astype(np.float32)
-        flow_img = flow_to_image(flow)
-
-        # Depth: out['depth'] is [B,1,H,W]
-        depth = out.get("depth", None)
+        if flow is not None:
+            flow = flow.to(device, non_blocking=True)
+            flow_valid = flow_valid.to(device, non_blocking=True)
         if depth is not None:
-            dep = depth[0, 0].detach().cpu().numpy().astype(np.float32)
+            depth = depth.to(device, non_blocking=True)
+        if depth_valid is not None:
+            depth_valid = depth_valid.to(device, non_blocking=True)
+
+        # forward (if GT exists, pass flow_gt and test_mode=False like train.py)
+        if flow is not None:
+            out = model(image1, image2, iters=args.iters, flow_gt=flow, test_mode=False)
+        else:
+            out = model(image1, image2, iters=args.iters, flow_gt=None, test_mode=True)
+
+        # predictions for visualization
+        flow_pred = out["final"][0].detach().cpu().numpy().transpose(1, 2, 0).astype(np.float32)
+        flow_img = flow_to_image(flow_pred)
+
+        depth_pred = out.get("depth", None)
+        if depth_pred is not None:
+            dep = depth_pred[0, 0].detach().cpu().numpy().astype(np.float32)
             dep_img = depth_to_colormap(dep, valid_mask=np.isfinite(dep) & (dep > 0))
         else:
             dep_img = np.zeros((flow_img.shape[0], flow_img.shape[1], 3), dtype=np.uint8)
 
-        # RGB for reference
         rgb_img = tensor_image_to_uint8(image1[0])
 
-        # save
         stem = os.path.splitext(frame_name)[0]
         save_png(os.path.join(out_rgb, f"{stem}_rgb.png"), rgb_img)
         save_png(os.path.join(out_flow, f"{stem}_flow.png"), flow_img)
         save_png(os.path.join(out_depth, f"{stem}_depth.png"), dep_img)
+        save_png(os.path.join(out_triplet, f"{stem}_triplet.png"), concat_horiz([rgb_img, flow_img, dep_img]))
 
-        trip = concat_horiz([rgb_img, flow_img, dep_img])
-        save_png(os.path.join(out_triplet, f"{stem}_triplet.png"), trip)
+        # metrics (ONLY if GT available)
+        note = ""
+        if flow is not None and flow_valid is not None:
+            flow_loss_t, metrics = sequence_loss(out, flow, flow_valid, gamma=0.85)  # train.py uses gamma=0.85
+            dloss_t = depth_l1_loss(out.get("depth", None), depth, depth_valid)
+            dmet = depth_metrics(out.get("depth", None), depth, depth_valid)
 
-        if (i + 1) % 5 == 0 or (i + 1) == len(loader):
-            print(f"[INFO] Processed {i+1}/{len(loader)}")
+            flow_loss = float(flow_loss_t.item())
+            epe = float(metrics.get("epe", 0.0))
+            f1 = float(metrics.get("f1", 0.0))
+
+            depth_loss = float(dloss_t.item())
+            depth_mae = float(dmet["depth_mae"])
+            depth_rmse = float(dmet["depth_rmse"])
+            depth_abs_rel = float(dmet["depth_abs_rel"])
+
+            print(
+                f"[eval] {i+1:04d}/{len(loader):04d} "
+                f"flow_loss={flow_loss:.4f} epe={epe:.3f} f1={f1:.2f} "
+                f"d_loss={depth_loss:.4f} d_mae={depth_mae:.3f} d_rmse={depth_rmse:.3f} d_abs_rel={depth_abs_rel:.3f} "
+                f"name={frame_name}"
+            )
+
+            sums["flow_loss"] += flow_loss
+            sums["epe"] += epe
+            sums["f1"] += f1
+            sums["depth_loss"] += depth_loss
+            sums["depth_mae"] += depth_mae
+            sums["depth_rmse"] += depth_rmse
+            sums["depth_abs_rel"] += depth_abs_rel
+            n_metric += 1
+        else:
+            flow_loss = epe = f1 = ""
+            depth_loss = depth_mae = depth_rmse = depth_abs_rel = ""
+            note = "no_gt(split=testing). Use split=training to compute metrics like train.py."
+            if (i + 1) % 5 == 0 or (i + 1) == len(loader):
+                print(f"[INFO] Processed {i+1}/{len(loader)} (no GT metrics)")
+
+        row = {
+            "run_id": run_id,
+            "split": args.split,
+            "iter": i,
+            "frame_name": frame_name,
+            "flow_loss": flow_loss,
+            "epe": epe,
+            "f1": f1,
+            "depth_loss": depth_loss,
+            "depth_mae": depth_mae,
+            "depth_rmse": depth_rmse,
+            "depth_abs_rel": depth_abs_rel,
+            "note": note,
+        }
+        _csv_append_row(csv_path, fieldnames, row)
+
+    if n_metric > 0:
+        summary = {
+            "run_id": run_id,
+            "split": args.split,
+            "iter": "summary",
+            "frame_name": "",
+            "flow_loss": sums["flow_loss"] / n_metric,
+            "epe": sums["epe"] / n_metric,
+            "f1": sums["f1"] / n_metric,
+            "depth_loss": sums["depth_loss"] / n_metric,
+            "depth_mae": sums["depth_mae"] / n_metric,
+            "depth_rmse": sums["depth_rmse"] / n_metric,
+            "depth_abs_rel": sums["depth_abs_rel"] / n_metric,
+            "note": f"average over {n_metric} samples",
+        }
+        _csv_append_row(csv_path, fieldnames, summary)
+        print(
+            f"[eval-summary] flow_loss={summary['flow_loss']:.4f} epe={summary['epe']:.3f} f1={summary['f1']:.2f} | "
+            f"d_loss={summary['depth_loss']:.4f} d_mae={summary['depth_mae']:.3f} "
+            f"d_rmse={summary['depth_rmse']:.3f} d_abs_rel={summary['depth_abs_rel']:.3f}"
+        )
+
+    print(f"[eval] CSV saved to: {csv_path}")
 
 
 if __name__ == "__main__":
     args = build_args()
-    run_kitti_testing_inference(args)
+    run_kitti_inference_and_log(args)

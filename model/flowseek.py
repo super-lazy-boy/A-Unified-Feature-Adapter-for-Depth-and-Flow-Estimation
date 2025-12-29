@@ -91,6 +91,7 @@ class FlowSeek(nn.Module, PyTorchModelHubMixin):
 
             else:
                 raise ValueError(f"Unknown args.model_feat = {args.feat_type}")
+            
             self.update_block = BasicUpdateBlock(args, hdim=args.dim * 2, cdim=args.dim * 2)
 
         self.depth_head = DepthHead(in_ch=1, hidden=32)
